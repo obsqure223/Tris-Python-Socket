@@ -1,6 +1,7 @@
 import uuid
 import time
 import threading
+import random  # <--- IMPORTANTE
 
 class GameRoomError(Exception):
     pass
@@ -9,10 +10,14 @@ class GameRoom:
     def __init__(self, creator_id):
         self.lock = threading.Lock()
         self.id = str(uuid.uuid4())
-        self.players = {creator_id: "X"}
+        
+        # --- MODIFICA: All'inizio il creatore non ha simbolo (None) ---
+        self.players = {creator_id: None} 
+        # --------------------------------------------------------------
+        
         self.connections = {} 
         self.board = [None] * 9
-        self.turn = "X"
+        self.turn = None # Il turno viene deciso dopo
         self.status = "waiting"
         self.move_history = []
         self.created_at = time.time()
@@ -25,12 +30,31 @@ class GameRoom:
             if len(self.players) >= 2:
                 raise GameRoomError("Room full")
             
-            self.players[player_id] = "O"
+            # Aggiungiamo il secondo giocatore (ancora senza simbolo)
+            self.players[player_id] = None
             self.connections[player_id] = conn
+            
+            # --- SORTEGGIO CASUALE ---
+            # Prendiamo gli ID dei due giocatori connessi
+            p_ids = list(self.players.keys()) # [Host, Joiner]
+            
+            # Mischiamo la lista a caso
+            random.shuffle(p_ids) 
+            
+            # Assegniamo i simboli in base all'ordine mischiato
+            self.players[p_ids[0]] = "X" # Il primo estratto sarà X (e inizierà)
+            self.players[p_ids[1]] = "O" # Il secondo sarà O
+            
+            self.turn = "X" # Tocca sempre a X per primo
             self.status = "running"
-            return "O"
+            
+            print(f"[GameRoom] Sorteggio effettuato: X={p_ids[0]}, O={p_ids[1]}")
+            
+            # Ritorniamo il simbolo assegnato a CHI STA ENTRANDO ORA
+            return self.players[player_id]
 
     def apply_move(self, player_id, pos):
+        # ... (Il resto del codice di apply_move e _check_winner rimane identico) ...
         with self.lock:
             if self.status != "running":
                 return {"ok": False, "reason": "Game not running"}
@@ -45,30 +69,23 @@ class GameRoom:
             if not (0 <= pos < 9) or self.board[pos] is not None:
                 return {"ok": False, "reason": "Invalid move"}
 
-            # Applica mossa
             self.board[pos] = player_symbol
             self.move_history.append({"player": player_id, "pos": pos})
             
-            print(f"[GameRoom] Mossa di {player_symbol} in {pos}. Board: {self.board}") # DEBUG
-
-            # CONTROLLA VINCITORE PRIMA DI CAMBIARE IL TURNO
-            # (O controllalo sulla board attuale, non cambia nulla, ma loggiamo)
+            # CONTROLLA VINCITORE
             winner = self._check_winner()
             
             if winner:
-                print(f"[GameRoom] VINCITORE TROVATO: {winner}") # DEBUG
                 self.status = "ended"
                 self.ended_at = time.time()
                 result = f"{winner}_wins"
                 next_turn = None
             elif all(cell is not None for cell in self.board):
-                print(f"[GameRoom] PAREGGIO") # DEBUG
                 self.status = "ended"
                 self.ended_at = time.time()
                 result = "draw"
                 next_turn = None
             else:
-                # Cambio turno solo se il gioco continua
                 self.turn = "O" if self.turn == "X" else "X"
                 next_turn = self.turn
                 result = "running"
@@ -88,7 +105,6 @@ class GameRoom:
             (0, 4, 8), (2, 4, 6)
         ]
         for a, b, c in lines:
-            # Controlla se le celle non sono None e sono uguali
             if self.board[a] is not None and self.board[a] == self.board[b] == self.board[c]:
                 return self.board[a]
         return None
