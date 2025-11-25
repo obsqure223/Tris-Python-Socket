@@ -4,7 +4,7 @@ from protocollo import send_msg, recv_msg
 import queue
 
 class TrisClient:
-    def __init__(self, host="136.113.248.201", port=5000):
+    def __init__(self, host="127.0.0.1", port=5000):
         self.host = host
         self.port = port
         self.sock = None
