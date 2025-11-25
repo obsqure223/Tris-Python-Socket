@@ -75,38 +75,53 @@ def client_handler(conn, addr):
             # CASO B: C'è una stanza in attesa -> Unisciti
             else:
                 room = waiting_room
+                # Identifica chi è l'Host (chi era già dentro)
                 host_id = list(room.players.keys())[0]
                 host_conn = room.connections.get(host_id)
                 
                 try:
-                    # Tenta di aggiungere il secondo giocatore
+                    # Aggiunge il giocatore (questo scatena il random.shuffle in gameroom.py)
                     room.add_player(player_id, conn)
+                    
                     waiting_room = None # La stanza ora è piena
                     current_room = room
                     
+                    # --- RECUPERO SIMBOLI SORTEGGIATI ---
+                    # Non assumiamo più che Host sia X. Leggiamo cosa ha deciso la Room.
+                    host_symbol = room.players[host_id]
+                    joiner_symbol = room.players[player_id]
+                    # ------------------------------------
+
                     # --- AVVIO PARTITA ---
                     match_started = True
                     
-                    # Notifica Host (Chi era in attesa, gioca come X)
+                    # Notifica Host
                     try:
                         send_msg(host_conn, {
                             "type": "match_found",
-                            "data": {"game_id": room.id, "you_are": "X", "opponent": player_id}
+                            "data": {
+                                "game_id": room.id, 
+                                "you_are": host_symbol,  # Simbolo reale sorteggiato
+                                "opponent": player_id
+                            }
                         })
                     except Exception as e:
                         print(f"[Server] ERRORE critico invio a Host {host_id}: {e}")
                         match_started = False
-                        # L'host è probabilmente disconnesso/morto -> chiudiamo il suo socket
                         try: host_conn.close()
                         except: pass
                         if room.id in rooms: del rooms[room.id]
 
-                    # Se l'host era vivo, notifica il Joiner (Tu, gioca come O)
+                    # Notifica Joiner (Tu)
                     if match_started:
                         try:
                             send_msg(conn, {
                                 "type": "match_found",
-                                "data": {"game_id": room.id, "you_are": "O", "opponent": host_id}
+                                "data": {
+                                    "game_id": room.id, 
+                                    "you_are": joiner_symbol, # Simbolo reale sorteggiato
+                                    "opponent": host_id
+                                }
                             })
                         except Exception as e:
                             print(f"[Server] Errore invio a Joiner {player_id}: {e}")
@@ -136,6 +151,7 @@ def client_handler(conn, addr):
             if action == "move":
                 pos = msg.get("pos")
                 if current_room:
+                    # La logica del turno è gestita dalla room
                     res = current_room.apply_move(player_id, pos)
                     broadcast_game_state(current_room, res)
 
