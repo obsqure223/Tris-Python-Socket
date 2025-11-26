@@ -1,86 +1,72 @@
+# client/client.py
+
 import socket
 import threading
-from protocollo import send_msg, recv_msg
-import queue
+from protocollo import send_msg, recv_msg  # Import diretto come richiesto
 
 class TrisClient:
-    def __init__(self, host="127.0.0.1", port=5000):
+    def __init__(self, host='127.0.0.1', port=5000):
         self.host = host
         self.port = port
         self.sock = None
         self.connected = False
-        self.callbacks = []
-        self.msg_queue = queue.Queue()
-        self._recv_thread = None
-        self._lock = threading.Lock()
+        self.callback = None
+        self.receive_thread = None
 
     def connect(self):
-        if self.connected:
+        """Tenta la connessione al server."""
+        self.sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        self.sock.connect((self.host, self.port))
+        self.connected = True
+        
+        # Avvia il thread di ascolto
+        self.receive_thread = threading.Thread(target=self._receive_loop, daemon=True)
+        self.receive_thread.start()
+
+    def register_callback(self, callback_func):
+        """Collega la funzione GUI per ricevere aggiornamenti."""
+        self.callback = callback_func
+
+    def send(self, data):
+        """Invia dati usando la funzione condivisa send_msg."""
+        if not self.sock or not self.connected:
             return
 
         try:
-            # Connessione SINCRONA (bloccante) per essere sicuri
-            # che quando questa funzione ritorna, siamo connessi.
-            self.sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-            self.sock.connect((self.host, self.port))
-            self.connected = True
-            print("[TrisClient] Connesso al server")
-            
-            # Avvia il thread di ricezione solo dopo la connessione
-            self._recv_thread = threading.Thread(target=self._recv_loop, daemon=True)
-            self._recv_thread.start()
-            
+            # Usa direttamente la funzione del protocollo
+            send_msg(self.sock, data)
         except Exception as e:
-            print(f"[TrisClient] Errore di connessione: {e}")
+            print(f"[CLIENT] Errore invio (send_msg): {e}")
+            self._handle_disconnect()
+
+    def _receive_loop(self):
+        """Loop che usa recv_msg per leggere i pacchetti completi."""
+        while self.connected and self.sock:
+            try:
+                # recv_msg è bloccante e gestisce header + payload
+                message = recv_msg(self.sock)
+                
+                if self.callback:
+                    self.callback(message)
+
+            except Exception as e:
+                # Se recv_msg fallisce (connessione chiusa o errore protocollo), usciamo
+                if self.connected: 
+                    print(f"[CLIENT] Disconnessione o errore ricezione: {e}")
+                break
+        
+        self._handle_disconnect()
+
+    def _handle_disconnect(self):
+        """Pulisce la connessione e avvisa la GUI."""
+        if self.connected:
+            print("[CLIENT] Chiusura connessione.")
             self.connected = False
             if self.sock:
-                self.sock.close()
-
-    def _recv_loop(self):
-        try:
-            while self.connected:
-                msg = None
-                try:
-                    # Se siamo disconnessi, esci subito
-                    if not self.sock: break
-                    msg = recv_msg(self.sock)
-                except Exception:
-                    # Qualsiasi errore di rete -> interrompi
-                    break
-
-                if msg is None:
-                    print("[TrisClient] Connessione chiusa dal server")
-                    # Se il server chiude la connessione mentre eravamo connessi
-                    # potrebbe essere il "reset" forzato dalla logica server.
-                    # Mettiamo un messaggio speciale in coda.
-                    if self.connected:
-                        self.msg_queue.put({"type": "connection_lost"})
-                    break
-
-                self.msg_queue.put(msg)
-                for cb in self.callbacks:
-                    try: cb(msg)
-                    except: pass
-
-        finally:
-            with self._lock:
-                if self.sock:
-                    try: self.sock.close()
-                    except: pass
-                    self.sock = None
-                self.connected = False
-
-    def send(self, msg):
-        if not self.connected or self.sock is None:
-            print("[TrisClient] Tentativo di invio senza connessione")
-            return
-        try:
-            with self._lock:
-                send_msg(self.sock, msg)
-        except Exception as e:
-            print(f"[TrisClient] Errore send: {e}")
-            self.connected = False
-    
-    def register_callback(self, callback):
-        if callback not in self.callbacks:
-            self.callbacks.append(callback)
+                try: self.sock.close()
+                except: pass
+            self.sock = None
+            
+            # Avvisa la GUI
+            if self.callback:
+                self.callback({"type": "connection_lost"})
