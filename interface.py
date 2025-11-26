@@ -270,7 +270,7 @@ class TrisFletUI:
         c = self.get_c()
         
         # 1. Puliamo la chat (in memoria)
-        self._reset_chat("")
+        self._reset_chat("Lobby Chat")
         
         self.chat_drawer_button.visible = False 
         self.exit_button.visible = False 
