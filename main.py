@@ -4,6 +4,9 @@ import flet as ft
 from client import TrisClient
 import warnings
 import time
+import random
+import threading
+import math # Serve per le onde
 
 # Ignora warning deprecazione
 warnings.filterwarnings("ignore")
@@ -16,168 +19,291 @@ class TrisFletUI:
         self.room_id = None
         self.my_symbol = None
         self.opponent = None
-        self.board_buttons = []
-        self.status_text = None
         
-        # Riferimenti ai controlli del login per poterli riattivare in caso di errore
+        self.board_items = [] 
+        
+        self.status_text = None
         self.login_button = None
         self.nickname_input = None
+        self.error_text = None
+        self.current_dialog = None
 
-        self.page.title = "Tris Multiplayer - Ture Pagans"
+        # Variabili per l'animazione background
+        self.anim_running = False
+        self.background_objs = [] 
+
+        self.page.title = "Tris Multiplayer"
         self.page.vertical_alignment = ft.MainAxisAlignment.CENTER
         self.page.horizontal_alignment = ft.CrossAxisAlignment.CENTER
         self.page.theme_mode = ft.ThemeMode.DARK 
+        self.page.bgcolor = "blueGrey900" 
+
+        # --- NAVBAR ---
+        self.theme_icon = ft.IconButton(
+            icon="wb_sunny_outlined", 
+            tooltip="Cambia Tema",
+            on_click=self.toggle_theme
+        )
+
+        self.exit_button = ft.IconButton(
+            icon="exit_to_app", 
+            tooltip="Esci dalla partita",
+            visible=False, 
+            on_click=self.request_exit_dialog
+        )
+
+        self.page.appbar = ft.AppBar(
+            leading=self.exit_button, 
+            leading_width=40,
+            title=ft.Text("Tris Multiplayer", weight=ft.FontWeight.BOLD),
+            center_title=True,        
+            bgcolor="blueGrey900", 
+            actions=[self.theme_icon, ft.Container(width=10)]
+        )
 
         self.show_login()
 
-    def show_login(self):
-        """Mostra la schermata di login con limite caratteri fisico"""
-        self.page.controls.clear()
-        self.page.dialog = None 
+    def toggle_theme(self, e):
+        if self.page.theme_mode == ft.ThemeMode.DARK:
+            self.page.theme_mode = ft.ThemeMode.LIGHT
+            self.theme_icon.icon = "dark_mode_outlined" 
+            self.page.bgcolor = "blueGrey50"
+            self.page.appbar.bgcolor = "blueGrey200"
+        else:
+            self.page.theme_mode = ft.ThemeMode.DARK
+            self.theme_icon.icon = "wb_sunny_outlined" 
+            self.page.bgcolor = "blueGrey900"
+            self.page.appbar.bgcolor = "blueGrey900"
+        self.page.update()
+
+    # --- ANIMAZIONE BACKGROUND A ONDE ---
+    def _animation_loop(self):
+        """Thread che muove le icone a onde"""
+        t = 0 # Tempo per la funzione seno
         
-        default_nick = self.nickname if self.nickname else ""
+        while self.anim_running:
+            try:
+                # Dimensioni schermo (fallback se non ancora caricato)
+                h = self.page.height if self.page.height else 800
+                w = self.page.width if self.page.width else 600
+                
+                t += 0.05
+                
+                for i, obj in enumerate(self.background_objs):
+                    # obj = {'control': Image, 'speed': float, 'y': float, 'base_x': float, 'amplitude': float}
+                    
+                    # 1. Movimento Verticale (Caduta)
+                    obj['y'] += obj['speed']
+                    
+                    # 2. Movimento Orizzontale (Onda)
+                    # x = posizione_iniziale + ampiezza * sin(tempo + offset_diverso_per_ogni_icona)
+                    wave_offset = obj['amplitude'] * math.sin(t + i)
+                    current_x = obj['base_x'] + wave_offset
+                    
+                    # 3. Reset se esce dal basso
+                    if obj['y'] > h:
+                        obj['y'] = -50 # Riparte da sopra
+                        obj['base_x'] = random.randint(0, int(w)) # Nuova colonna casuale
+                    
+                    # Applica posizione
+                    obj['control'].top = obj['y']
+                    obj['control'].left = current_x
+
+                self.page.update()
+                time.sleep(0.02) # ~50 FPS per fluidità
+            except Exception as e:
+                # Se la pagina viene chiusa o c'è un errore, ferma il loop
+                print(f"Animation stopping: {e}")
+                break
+
+    def start_background_animation(self):
+        """Crea le icone e avvia il thread"""
+        self.anim_running = True
+        self.background_objs = []
         
-        self.nickname_input = ft.TextField(
-            label="Nickname", 
-            width=200, 
-            text_align=ft.TextAlign.CENTER,
-            value=default_nick,
-            on_submit=self.on_connect,
+        # Creiamo 30 icone piccole
+        for _ in range(30):
+            symbol = random.choice(["x.png", "o.png"])
+            size = random.randint(20, 40) # Piccole
             
-            # --- MODIFICA QUI ---
-            max_length=15  # Blocca la scrittura dopo 12 caratteri
-            # --------------------
+            start_x = random.randint(0, 1000)
+            start_y = random.randint(-800, 0) # Partono fuori schermo o sparse
+            
+            speed = random.uniform(1, 3) # Velocità caduta
+            amplitude = random.randint(20, 60) # Quanto è larga l'onda
+            
+            img = ft.Image(
+                src=symbol,
+                width=size,
+                height=size,
+                opacity=0.3, # Semi-trasparenti
+                fit=ft.ImageFit.CONTAIN,
+                left=start_x,
+                top=start_y,
+                # IMPORTANTE: animate_position=None qui perché gestiamo noi ogni frame
+            )
+            
+            self.background_objs.append({
+                'control': img,
+                'speed': speed,
+                'y': float(start_y),
+                'base_x': float(start_x),
+                'amplitude': amplitude
+            })
+            
+        # Avvia il thread
+        threading.Thread(target=self._animation_loop, daemon=True).start()
+
+    def stop_animation(self):
+        self.anim_running = False
+
+    # --- DIALOGHI ---
+    def request_exit_dialog(self, e):
+        self.current_dialog = ft.AlertDialog(
+            modal=True,
+            title=ft.Text("Vuoi uscire?"),
+            content=ft.Text("Perderai la connessione e tornerai al login."),
+            actions=[
+                ft.TextButton("Annulla", on_click=self.close_dialog),
+                ft.TextButton("Esci", on_click=self.confirm_exit_and_logout, style=ft.ButtonStyle(color="red")),
+            ],
+            actions_alignment=ft.MainAxisAlignment.END,
         )
+        self.page.open(self.current_dialog)
+
+    def close_dialog(self, e):
+        if self.current_dialog:
+            self.page.close(self.current_dialog)
+            self.current_dialog = None
+
+    def confirm_exit_and_logout(self, e):
+        self.close_dialog(e)
+        self.logout(None)
+
+    # --- LOGIN SCREEN ---
+    def show_login(self):
+        # 1. Pulizia e Stop vecchie animazioni
+        self.stop_animation()
+        time.sleep(0.1) # Breve pausa per essere sicuri che il thread si fermi
         
-        self.error_text = ft.Text(
-            value="", 
-            color="red", 
-            size=14, 
-            weight=ft.FontWeight.BOLD,
-            visible=False,
-            text_align=ft.TextAlign.CENTER
+        self.page.controls.clear()
+        if self.exit_button:
+            self.exit_button.visible = False 
+            self.page.update() 
+
+        # 2. Setup Form Login
+        default_nick = self.nickname if self.nickname else ""
+        self.nickname_input = ft.TextField(
+            label="Nickname", width=200, text_align=ft.TextAlign.CENTER,
+            value=default_nick, on_submit=self.on_connect, max_length=15,
+            #bgcolor="#CC37474F", # Input scuro leggibile
+            border_color="white"
         )
+        self.error_text = ft.Text(value="", color="red", size=14, weight=ft.FontWeight.BOLD, visible=False, text_align=ft.TextAlign.CENTER)
+        self.login_button = ft.ElevatedButton("Connetti", on_click=self.on_connect, width=150)
         
-        self.login_button = ft.ElevatedButton(
-            "Connetti", 
-            on_click=self.on_connect, 
-            width=150
-        )
-        
-        self.page.add(
-            ft.Column(
+        # Contenitore "Vetro" per il login
+        login_container = ft.Container(
+            content=ft.Column(
                 [
                     ft.Text("Benvenuto a Tris!", size=30, weight=ft.FontWeight.BOLD),
                     ft.Divider(height=20, color="transparent"),
-                    self.nickname_input,
-                    self.error_text, 
-                    ft.Container(height=10), 
-                    self.login_button
+                    self.nickname_input, self.error_text, 
+                    ft.Container(height=10), self.login_button
                 ],
                 horizontal_alignment=ft.CrossAxisAlignment.CENTER,
                 alignment=ft.MainAxisAlignment.CENTER
-            )
+            ),
+            padding=40,
+            border_radius=20,
+            width=350,
+            # Sfondo nero al 70% di opacità per far risaltare il testo sopra le animazioni
+            #bgcolor="#B3000000", 
+            #border=ft.border.all(1, ft.Colors.WHITE24),
+            #shadow=ft.BoxShadow(
+                #spread_radius=1,
+                #blur_radius=15,
+               # color=ft.Colors.BLACK54,
+          #  )
         )
+
+        # 3. Preparazione Animazione
+        self.start_background_animation()
+        
+        # Estrai i controlli immagine dalla lista oggetti
+        background_controls = [obj['control'] for obj in self.background_objs]
+
+        # 4. Stack Principale: Sfondo Animato SOTTO, Login SOPRA
+        login_stack = ft.Stack(
+            controls=background_controls + [
+                ft.Container(
+                    content=login_container,
+                    alignment=ft.alignment.center, # Centra il form
+                    expand=True
+                )
+            ],
+            expand=True 
+        )
+
+        self.page.add(login_stack)
         self.page.update()
 
     def on_connect(self, e):
-        """Gestisce il click sul tasto Connetti"""
-        
-        # 1. RESET: Nascondi l'errore e fai "salire" il bottone
         self.error_text.visible = False
-        self.error_text.value = ""
         self.page.update()
-
-        # .strip() rimuove gli spazi iniziali e finali
-        # Quindi se l'utente scrive "   ", diventa "" (stringa vuota)
         nick_val = self.nickname_input.value.strip()
         
-        # --- CONTROLLI CLIENT ---
         error_msg = None
-        
-        # 1. Controllo VUOTO (Nuovo)
-        if not nick_val:
-            error_msg = "Il nickname non può essere vuoto."
+        if not nick_val: error_msg = "Il nickname non può essere vuoto."
+        elif len(nick_val) < 3: error_msg = "Nickname troppo corto (min 3)."
+        elif len(nick_val) > 15: error_msg = "Nickname troppo lungo (max 15)."
+        elif not nick_val.isalnum(): error_msg = "Usa solo lettere e numeri."
             
-        # 2. Controllo LUNGHEZZA MINIMA
-        elif len(nick_val) < 3:
-            error_msg = "Nickname troppo corto (min 3)."
-            
-        # 3. Controllo LUNGHEZZA MASSIMA (ridondante con max_length, ma sicuro)
-        elif len(nick_val) > 15:
-            error_msg = "Nickname troppo lungo (max 15)."
-            
-        # 4. Controllo CARATTERI (Solo lettere e numeri)
-        elif not nick_val.isalnum():
-            error_msg = "Usa solo lettere e numeri."
-            
-        # Se abbiamo trovato un errore locale:
         if error_msg:
             self.error_text.value = error_msg
-            self.error_text.visible = True # Mostra l'errore e sposta il bottone
+            self.error_text.visible = True 
             self.page.update()
             return
-        # ------------------------
 
         self.nickname = nick_val
-        
-        # Disabilita UI se tutto è OK
         self.login_button.disabled = True
         self.login_button.text = "Connessione..."
         self.nickname_input.disabled = True
         self.page.update()
-
         self._perform_connection()
 
-    def _show_error(self, message):
-        """Mostra una barra rossa con l'errore"""
-        self.page.snack_bar = ft.SnackBar(
-            content=ft.Text(message, color="white"), 
-            bgcolor="red"
-        )
-        self.page.snack_bar.open = True
-        self.page.update()
-
     def _perform_connection(self):
-        """Avvia socket e invia login, ma NON cambia ancora la UI"""
         if self.client.sock:
-            try:
-                self.client.sock.close()
-            except:
-                pass
+            try: self.client.sock.close()
+            except: pass
         self.client.connected = False
         self.client.sock = None
 
-        # Connessione al server
         try:
             self.client.connect()
             self.client.register_callback(self.handle_server_message)
-            # Invio messaggio di Login
             self.client.send({"action": "join", "player_id": self.nickname})
         except Exception as e:
-            # Se fallisce proprio la connessione al socket (server spento)
             self._handle_login_error(f"Impossibile connettersi al server: {e}")
 
     def _handle_login_error(self, reason):
-        """Gestisce gli errori del Server"""
         print(f"[GUI] Errore Login: {reason}")
-        
-        # Mostra l'errore e sposta il bottone
         self.error_text.value = reason
-        self.error_text.visible = True # <-- Spinge giù il bottone
-        
-        # Riabilita i controlli
+        self.error_text.visible = True 
         if self.login_button:
             self.login_button.disabled = False
             self.login_button.text = "Connetti"
         if self.nickname_input:
             self.nickname_input.disabled = False
             self.nickname_input.focus()
-        
         self.page.update()
 
     def show_waiting_screen(self):
-        """Mostra la schermata di attesa (chiamata SOLO se login OK)"""
+        # FERMA L'ANIMAZIONE QUANDO CAMBI SCHERMATA
+        self.stop_animation()
+        
+        self.exit_button.visible = True 
+        self.page.update()
         self.page.controls.clear()
         self.page.add(
             ft.Column(
@@ -194,49 +320,28 @@ class TrisFletUI:
         self.page.update()
 
     def handle_server_message(self, msg):
-        """Riceve messaggi dal socket e aggiorna la UI"""
-        # Flet richiede di aggiornare la UI dal thread principale o tramite lock impliciti
-        # Di solito funziona bene, ma in casi complessi meglio usare page.run_task o simili.
-        # Qui lo teniamo semplice.
-        try:
-            self._update_ui(msg)
-        except Exception as e:
-            print(f"[GUI ERROR] Errore aggiornamento UI: {e}")
+        try: self._update_ui(msg)
+        except Exception as e: print(f"[GUI ERROR] Errore aggiornamento UI: {e}")
 
     def _update_ui(self, msg):
-        # --- NUOVA LOGICA GESTIONE RISPOSTE LOGIN ---
-        
-        # CASO 1: Il server rifiuta il login (ok: False)
         if msg.get("ok") is False:
-            reason = msg.get("reason", "Errore sconosciuto")
-            # Importante: siamo ancora sulla schermata login, quindi riattiviamo i bottoni
-            self._handle_login_error(reason)
-            # Chiudiamo il socket lato client per pulizia
+            self._handle_login_error(msg.get("reason", "Errore"))
             if self.client.sock: self.client.sock.close()
             return
-
-        # CASO 2: Il server accetta il login (ok: True, status: waiting)
         if msg.get("ok") is True and msg.get("status") == "waiting":
-            # ORA possiamo cambiare schermata
             self.show_waiting_screen()
             return
 
-        # --------------------------------------------
-
         msg_type = msg.get("type")
-        
         if msg_type == "connection_lost":
-            print("[GUI] Connessione persa. Torno al login.")
-            # Se perdiamo la connessione, torniamo al login (reset completo)
             self.logout(None)
             return
-        
         if msg_type == "match_found":
+            self.stop_animation()
             self.room_id = msg["data"]["game_id"]
             self.my_symbol = msg["data"]["you_are"]
             self.opponent = msg["data"]["opponent"]
             self.show_game_board()
-
         elif msg_type == "game_state":
             data = msg["data"]
             status = data.get("status")
@@ -244,15 +349,18 @@ class TrisFletUI:
             if status == "ended":
                 self.show_end_dialog(data["result"])
 
+    # --- BOARD A BOTTONI CON IMMAGINI ---
     def show_game_board(self):
-        """Costruisce e mostra la griglia di gioco"""
+        self.stop_animation() # Assicurati che sia ferma
+        self.exit_button.visible = True 
+        self.page.update()
+        
         self.page.controls.clear()
-        self.board_buttons = []
+        self.board_items = [] 
         
         self.status_text = ft.Text(
             f"Tu sei: {self.my_symbol} (vs {self.opponent})", 
-            size=20, 
-            weight=ft.FontWeight.BOLD,
+            size=20, weight=ft.FontWeight.BOLD,
             color="green" if self.my_symbol == "X" else "blue"
         )
 
@@ -261,18 +369,29 @@ class TrisFletUI:
             row_controls = []
             for c in range(3):
                 idx = r * 3 + c
+                
+                img = ft.Image(
+                    src="x.png",     
+                    opacity=0,       
+                    width=60, 
+                    height=60,
+                    fit=ft.ImageFit.CONTAIN
+                )
+                
                 btn = ft.ElevatedButton(
-                    text=" ",
-                    width=80,
-                    height=80,
+                    content=img,     
+                    width=90,        
+                    height=90,
                     style=ft.ButtonStyle(
                         shape=ft.RoundedRectangleBorder(radius=8),
-                        text_style=ft.TextStyle(size=40, weight=ft.FontWeight.BOLD),
+                        padding=0,   
                     ),
                     on_click=lambda e, i=idx: self.on_cell_click(i)
                 )
-                self.board_buttons.append(btn)
+                
+                self.board_items.append((btn, img))
                 row_controls.append(btn)
+            
             rows.append(ft.Row(controls=row_controls, alignment=ft.MainAxisAlignment.CENTER))
 
         board_container = ft.Column(
@@ -297,15 +416,26 @@ class TrisFletUI:
 
     def update_board(self, board, turn, result=None):
         for i, val in enumerate(board):
-            color = "green" if val == "X" else "blue" if val == "O" else "white"
-            self.board_buttons[i].content = ft.Text(val if val else " ", color=color, size=30, weight=ft.FontWeight.BOLD)
-            self.board_buttons[i].text = val if val else " "
+            btn, img = self.board_items[i]
             
+            if val == "X":
+                img.src = "x.png"
+                img.opacity = 1
+            elif val == "O":
+                img.src = "o.png"
+                img.opacity = 1
+            else:
+                img.src = "x.png" 
+                img.opacity = 0   
+            
+            img.update()
+
             is_my_turn = (turn == self.my_symbol)
             is_empty = (val is None)
             game_running = (turn is not None)
             
-            self.board_buttons[i].disabled = not (is_my_turn and is_empty and game_running)
+            btn.disabled = not (is_my_turn and is_empty and game_running)
+            btn.update()
         
         if self.status_text:
             if turn:
@@ -320,10 +450,8 @@ class TrisFletUI:
     def on_cell_click(self, idx):
         if not self.room_id: return
         self.client.send({
-            "action": "move",
-            "player_id": self.nickname,
-            "room_id": self.room_id,
-            "pos": idx
+            "action": "move", "player_id": self.nickname,
+            "room_id": self.room_id, "pos": idx
         })
 
     def show_end_dialog(self, result):
@@ -358,19 +486,15 @@ class TrisFletUI:
                 ft.Divider(height=40, color="transparent"),
                 
                 ft.ElevatedButton(
-                    text="Gioca di nuovo",
-                    icon="refresh",
-                    on_click=self.play_again, 
-                    width=250,
-                    height=50,
+                    text="Gioca di nuovo", icon="refresh",
+                    on_click=self.play_again, width=250, height=50,
                     style=ft.ButtonStyle(bgcolor="green", color="white")
                 ),
                 ft.Divider(height=10, color="transparent"),
                 
                 ft.TextButton(
                     text="Cambia Nickname (Esci)",
-                    on_click=self.logout, 
-                    style=ft.ButtonStyle(color="grey")
+                    on_click=self.logout, style=ft.ButtonStyle(color="grey")
                 )
             ],
             alignment=ft.MainAxisAlignment.CENTER,
@@ -380,7 +504,6 @@ class TrisFletUI:
         self.page.update()
 
     def play_again(self, e):
-        # Disconnessione pulita
         if self.client.sock:
             try: self.client.sock.close()
             except: pass
@@ -390,7 +513,6 @@ class TrisFletUI:
         self.my_symbol = None
         self.opponent = None
 
-        # Schermata transitoria
         self.page.controls.clear()
         pb = ft.ProgressBar(width=200, color="amber")
         status_txt = ft.Text("Riavvio server in corso...", size=16)
@@ -400,9 +522,7 @@ class TrisFletUI:
                 [
                     ft.Text("Preparazione nuova partita", size=24, weight=ft.FontWeight.BOLD),
                     ft.Divider(height=20, color="transparent"),
-                    pb,
-                    ft.Divider(height=10, color="transparent"),
-                    status_txt
+                    pb, ft.Divider(height=10, color="transparent"), status_txt
                 ],
                 alignment=ft.MainAxisAlignment.CENTER,
                 horizontal_alignment=ft.CrossAxisAlignment.CENTER
@@ -410,15 +530,12 @@ class TrisFletUI:
         )
         self.page.update()
 
-        # Delay tattico per pulizia server
         import time
         for i in range(15):
             time.sleep(0.1)
         
         status_txt.value = "Connessione in corso..."
         self.page.update()
-        
-        # Si riconnette usando il vecchio nickname senza passare dal login
         self._perform_connection()
 
     def logout(self, e):
@@ -427,10 +544,9 @@ class TrisFletUI:
             except: pass
         self.client.connected = False
         self.client.sock = None
-        
         self.show_login()
 
 def main(page: ft.Page):
     TrisFletUI(page)
 
-ft.app(target=main)
+ft.app(target=main, assets_dir="assets")
