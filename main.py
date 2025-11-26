@@ -3,23 +3,70 @@
 import socket
 import threading
 import time
+import flet as ft
 from protocollo import recv_msg, send_msg
 from gameroom import GameRoom, GameRoomError
 
-# --- STRUTTURE DATI GLOBALI ---
+# --- STATI GLOBALI ---
 rooms = {}              
 waiting_room = None     
 
-# Tracking univocità nickname
-connected_players = set()       
-players_lock = threading.Lock() 
+# Dizionario: player_id -> {"conn": conn, "status": "online" | "waiting" | "ingame"}
+players_data = {} 
 
-# Lock per la gestione delle stanze
+# Locks
+players_lock = threading.Lock() 
 rooms_lock = threading.Lock()
 waiting_lock = threading.Lock()
+active_conn_lock = threading.Lock()
+
+# Tracking Socket Attivi (Per chiusura forzata)
+active_connections = []     
+
+# Stato Server
+server_running = False
+server_socket = None
+gui_log_callback = None
+
+def log(message):
+    print(message) 
+    if gui_log_callback:
+        gui_log_callback(message)
+
+# --- FUNZIONI DI UTILITÀ ---
+
+def broadcast_player_list():
+    """Invia a TUTTI i client la lista aggiornata dei giocatori e il loro stato"""
+    with players_lock:
+        # Creiamo una lista leggera da inviare
+        users_list = [
+            {"name": pid, "status": data["status"]} 
+            for pid, data in players_data.items()
+        ]
+    
+    # Invio in broadcast
+    with players_lock:
+        targets = list(players_data.values())
+    
+    for p in targets:
+        try:
+            send_msg(p["conn"], {"type": "player_list_update", "data": users_list})
+        except: pass
+
+def broadcast_chat(sender, message):
+    """Invia un messaggio di chat a tutti"""
+    msg_obj = {
+        "type": "chat_message", 
+        "data": {"sender": sender, "message": message}
+    }
+    with players_lock:
+        targets = list(players_data.values())
+        
+    for p in targets:
+        try: send_msg(p["conn"], msg_obj)
+        except: pass
 
 def broadcast_game_state(room, data):
-    """Invia lo stato del gioco a tutti i giocatori nella stanza."""
     disconnected = []
     with room.lock:
         for pid, p_conn in room.connections.items():
@@ -29,201 +76,256 @@ def broadcast_game_state(room, data):
                 disconnected.append(pid)
     return disconnected
 
+# --- GESTIONE CLIENT ---
+
 def client_handler(conn, addr):
     global waiting_room
-    player_id = None     # Il nickname confermato
-    current_room = None  # La stanza attuale
+    player_id = None    
+    current_room = None 
     
-    print(f"[Server] Connessione da {addr}")
-    
+    log(f"[Connect] Connessione da {addr}")
+    with active_conn_lock:
+        active_connections.append(conn)
+
     try:
-        # 1. RICEZIONE PRIMO MESSAGGIO (LOGIN)
+        # 1. LOGIN
         msg = recv_msg(conn)
         if not msg: return
-        
+        if msg.get("action") == "ping": return 
+
         requested_id = msg.get("player_id")
         if not requested_id: return
 
-        # 2. CONTROLLO UNIVOCITÀ NICKNAME
         with players_lock:
-            if requested_id in connected_players:
-                print(f"[Server] Login rifiutato: '{requested_id}' è già connesso.")
-                try:
-                    send_msg(conn, {"ok": False, "reason": "Nickname già in uso!"})
+            if requested_id in players_data:
+                log(f"[Login] Rifiutato: '{requested_id}' già connesso.")
+                try: send_msg(conn, {"ok": False, "reason": "Nickname già in uso!"})
                 except: pass
-                return # Chiude la connessione ed esce
+                return 
             else:
-                # Nickname valido: lo registriamo
-                connected_players.add(requested_id)
+                # REGISTRAZIONE GIOCATORE - STATO INIZIALE: ONLINE (LOBBY)
+                players_data[requested_id] = {"conn": conn, "status": "online"}
                 player_id = requested_id
 
-        print(f"[Server] Login effettuato: {player_id}")
+        log(f"[Login] Entrato in Lobby: {player_id}")
+        send_msg(conn, {"ok": True, "status": "lobby"}) # Conferma login
+        broadcast_player_list() # Aggiorna le liste di tutti
 
-        # 3. MATCHMAKING
-        with waiting_lock:
-            # CASO A: Nessuna stanza in attesa -> Crea nuova stanza
-            if waiting_room is None:
-                room = GameRoom(player_id)
-                room.connections[player_id] = conn
-                rooms[room.id] = room
-                waiting_room = room
-                current_room = room
-                
-                send_msg(conn, {"ok": True, "status": "waiting"})
-                print(f"[Server] {player_id} ha creato stanza {room.id} in attesa...")
-            
-            # CASO B: C'è una stanza in attesa -> Unisciti
-            else:
-                room = waiting_room
-                # Identifica chi è l'Host (chi era già dentro)
-                host_id = list(room.players.keys())[0]
-                host_conn = room.connections.get(host_id)
-                
-                try:
-                    # Aggiunge il giocatore (questo scatena il random.shuffle in gameroom.py)
-                    room.add_player(player_id, conn)
-                    
-                    waiting_room = None # La stanza ora è piena
-                    current_room = room
-                    
-                    # --- RECUPERO SIMBOLI SORTEGGIATI ---
-                    # Non assumiamo più che Host sia X. Leggiamo cosa ha deciso la Room.
-                    host_symbol = room.players[host_id]
-                    joiner_symbol = room.players[player_id]
-                    # ------------------------------------
-
-                    # --- AVVIO PARTITA ---
-                    match_started = True
-                    
-                    # Notifica Host
-                    try:
-                        send_msg(host_conn, {
-                            "type": "match_found",
-                            "data": {
-                                "game_id": room.id, 
-                                "you_are": host_symbol,  # Simbolo reale sorteggiato
-                                "opponent": player_id
-                            }
-                        })
-                    except Exception as e:
-                        print(f"[Server] ERRORE critico invio a Host {host_id}: {e}")
-                        match_started = False
-                        try: host_conn.close()
-                        except: pass
-                        if room.id in rooms: del rooms[room.id]
-
-                    # Notifica Joiner (Tu)
-                    if match_started:
-                        try:
-                            send_msg(conn, {
-                                "type": "match_found",
-                                "data": {
-                                    "game_id": room.id, 
-                                    "you_are": joiner_symbol, # Simbolo reale sorteggiato
-                                    "opponent": host_id
-                                }
-                            })
-                        except Exception as e:
-                            print(f"[Server] Errore invio a Joiner {player_id}: {e}")
-                            match_started = False
-                    
-                    # FALLBACK: Se qualcosa è andato storto nell'handshake
-                    if not match_started:
-                        print(f"[Server] Match fallito. Sposto {player_id} in nuova stanza pulita.")
-                        new_room = GameRoom(player_id)
-                        new_room.connections[player_id] = conn
-                        rooms[new_room.id] = new_room
-                        waiting_room = new_room
-                        current_room = new_room
-                        send_msg(conn, {"ok": True, "status": "waiting"})
-
-                except GameRoomError as e:
-                    send_msg(conn, {"ok": False, "reason": str(e)})
-                    return
-
-        # 4. LOOP DI GIOCO
+        # 2. LOOP PRINCIPALE (LOBBY & GIOCO)
         while True:
             msg = recv_msg(conn)
-            if msg is None: break # Client disconnesso
+            if msg is None: break 
             
             action = msg.get("action")
             
-            if action == "move":
+            if action == "ping": continue
+
+            # --- GESTIONE CHAT ---
+            if action == "chat":
+                text = msg.get("message", "").strip()
+                if text:
+                    broadcast_chat(player_id, text)
+            
+            # --- GESTIONE START MATCHMAKING ---
+            elif action == "start_search":
+                log(f"[Matchmaking] {player_id} cerca partita...")
+                
+                # Aggiorna stato
+                with players_lock:
+                    if player_id in players_data:
+                        players_data[player_id]["status"] = "waiting"
+                broadcast_player_list()
+
+                # Logica Matchmaking
+                with waiting_lock:
+                    if waiting_room is None:
+                        room = GameRoom(player_id)
+                        room.connections[player_id] = conn
+                        rooms[room.id] = room
+                        waiting_room = room
+                        current_room = room
+                        send_msg(conn, {"type": "match_status", "status": "waiting"})
+                    else:
+                        room = waiting_room
+                        host_id = list(room.players.keys())[0]
+                        host_conn = room.connections.get(host_id)
+                        
+                        try:
+                            room.add_player(player_id, conn)
+                            waiting_room = None 
+                            current_room = room
+                            
+                            # Aggiorna stati a INGAME
+                            with players_lock:
+                                if host_id in players_data: players_data[host_id]["status"] = "ingame"
+                                if player_id in players_data: players_data[player_id]["status"] = "ingame"
+                            broadcast_player_list()
+
+                            # Sorteggio e Start
+                            host_symbol = room.players[host_id]
+                            joiner_symbol = room.players[player_id]
+                            
+                            send_msg(host_conn, {
+                                "type": "match_found",
+                                "data": {"game_id": room.id, "you_are": host_symbol, "opponent": player_id}
+                            })
+                            send_msg(conn, {
+                                "type": "match_found",
+                                "data": {"game_id": room.id, "you_are": joiner_symbol, "opponent": host_id}
+                            })
+                            log(f"[Match] Avviato: {host_id} vs {player_id}")
+
+                        except GameRoomError as e:
+                            send_msg(conn, {"ok": False, "reason": str(e)})
+
+            # --- GESTIONE MOSSE DI GIOCO ---
+            elif action == "move":
                 pos = msg.get("pos")
                 if current_room:
-                    # La logica del turno è gestita dalla room
                     res = current_room.apply_move(player_id, pos)
                     broadcast_game_state(current_room, res)
+                    
+                    if res.get("status") == "ended":
+                        log(f"[GameOver] Stanza {current_room.id[:8]}: {res.get('result')}")
+                        # Nota: Non cambiamo lo stato qui, perché i giocatori sono ancora nella schermata dei risultati.
+                        # Lo stato cambia quando inviano "back_to_lobby" o "start_search" (Gioca ancora).
+
+            # --- GESTIONE USCITA DALLA CODA ---
+            elif action == "leave_queue":
+                with waiting_lock:
+                    if waiting_room and list(waiting_room.players.keys())[0] == player_id:
+                        waiting_room = None
+                        log(f"[Matchmaking] {player_id} ha annullato la ricerca.")
+                
+                with players_lock:
+                    if player_id in players_data:
+                        players_data[player_id]["status"] = "online"
+                broadcast_player_list()
+
+            # --- NUOVO: GESTIONE RITORNO IN LOBBY ---
+            elif action == "back_to_lobby":
+                log(f"[Lobby] {player_id} è tornato in lobby.")
+                
+                # Resettiamo lo stato a 'online'
+                with players_lock:
+                    if player_id in players_data:
+                        players_data[player_id]["status"] = "online"
+                
+                # Reset della stanza corrente per questo thread
+                current_room = None
+                
+                # Aggiorniamo la lista per tutti (così il pallino diventa verde)
+                broadcast_player_list()
 
     except Exception as e:
-        # Ignora errori di reset connessione standard
-        if "10054" not in str(e):
-            print(f"[Server] Errore imprevisto per {player_id}: {e}")
+        if server_running and "10054" not in str(e):
+            log(f"[Error] {player_id}: {e}")
 
     finally:
-        print(f"[Server] Disconnessione {player_id}")
-        
-        # A. Rilascia il nickname
-        if player_id:
-            with players_lock:
-                if player_id in connected_players:
-                    connected_players.remove(player_id)
-                    print(f"[Server] Nickname '{player_id}' liberato.")
+        with active_conn_lock:
+            if conn in active_connections:
+                active_connections.remove(conn)
 
-        # B. Chiudi socket
-        try: conn.close()
-        except: pass
+        log(f"[Disconnect] {player_id if player_id else addr}")
         
-        # C. Pulizia Waiting Room (se il giocatore era in attesa da solo)
-        with waiting_lock:
-            if waiting_room and current_room and waiting_room.id == current_room.id:
-                waiting_room = None
-                print("[Server] Waiting room rimossa (host disconnesso).")
+        # Rimuovi giocatore e aggiorna lista
+        with players_lock:
+            if player_id in players_data:
+                del players_data[player_id]
         
-        # D. Pulizia Partita in Corso (notifica avversario)
+        # Se era in partita, gestisci disconnessione
         if player_id and current_room:
             with current_room.lock:
-                # Rimuovi la connessione del giocatore uscente
                 if player_id in current_room.connections:
                     del current_room.connections[player_id]
-                
-                # Se la partita era in corso, termina per abbandono
                 if current_room.status == "running":
                     current_room.status = "ended"
-                    for other_pid, other_conn in current_room.connections.items():
+                    for other_conn in current_room.connections.values():
                         try:
                             send_msg(other_conn, {
                                 "type": "game_state",
-                                "data": {
-                                    "status": "ended",
-                                    "result": f"{current_room.players[player_id]}_disconnected",
-                                    "board": current_room.board,
-                                    "turn": None
-                                }
+                                "data": {"status": "ended", "result": f"{current_room.players[player_id]}_disconnected", "board": current_room.board, "turn": None}
                             })
-                            print(f"[Server] Notificato avversario {other_pid} dell'abbandono.")
                         except: pass
-
-def start_server(host="0.0.0.0", port=5000):
-    s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-    # Permette di riavviare il server subito senza errore "Address already in use"
-    s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-    
-    try:
-        s.bind((host, port))
-        s.listen()
-        print(f"[Server] Avviato su {host}:{port}")
-        print("[Server] In attesa di connessioni...")
         
-        while True:
-            conn, addr = s.accept()
-            # Avvia un thread per ogni client
-            threading.Thread(target=client_handler, args=(conn, addr), daemon=True).start()
-            
-    except Exception as e:
-        print(f"[Server] Errore avvio: {e}")
-    finally:
-        s.close()
+        # Se era in waiting room
+        with waiting_lock:
+            if waiting_room and current_room and waiting_room.id == current_room.id:
+                waiting_room = None
+
+        try: conn.close()
+        except: pass
+        
+        # Aggiorna la lista per chi è rimasto
+        broadcast_player_list()
+
+# --- THREAD LISTENER & GUI ---
+
+def run_server_listener(host, port):
+    global server_socket, server_running
+    server_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    server_socket.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+    try:
+        server_socket.bind((host, port))
+        server_socket.listen()
+        log(f"--- SERVER ONLINE SU {host}:{port} ---")
+        while server_running:
+            try:
+                conn, addr = server_socket.accept()
+                threading.Thread(target=client_handler, args=(conn, addr), daemon=True).start()
+            except OSError: break
+    except Exception as e: log(f"Errore avvio server: {e}")
+    finally: log("--- SERVER OFFLINE ---"); server_running = False
+
+def main(page: ft.Page):
+    global gui_log_callback, server_running, server_socket
+    page.title = "Tris Server Console"; page.theme_mode = ft.ThemeMode.DARK; page.window_width = 700; page.window_height = 550; page.bgcolor = "#1f2128"
+    logs_view = ft.ListView(expand=True, spacing=5, padding=15, auto_scroll=True)
+    def add_log_line(text):
+        color = "#e0e0e0"
+        if "[Error]" in text: color = "#ff5252"
+        elif "[Match]" in text: color = "#69f0ae"
+        elif "[Login]" in text: color = "#40c4ff"
+        elif "[Connect]" in text: color = "#9e9e9e"
+        elif "--- SERVER" in text: color = "#ffd740"
+        logs_view.controls.append(ft.Text(f"{time.strftime('%H:%M:%S')} | {text}", color=color, font_family="Consolas", size=13))
+        page.update()
+    gui_log_callback = add_log_line
+    status_indicator = ft.Container(width=15, height=15, border_radius=15, bgcolor="red", animate=ft.Animation(500, "bounceOut"))
+    status_text = ft.Text("SERVER FERMO", weight="bold", color="red")
+    def start_server_click(e):
+        global server_running
+        if server_running: return
+        server_running = True
+        btn_start.disabled = True; btn_stop.disabled = False; status_indicator.bgcolor = "green"; status_text.value = "SERVER ATTIVO (Port 5000)"; status_text.color = "green"; page.update()
+        threading.Thread(target=run_server_listener, args=("0.0.0.0", 5000), daemon=True).start()
+    def stop_server_click(e):
+        global server_running, server_socket
+        if not server_running: return
+        log("Arresto server richiesto...")
+        server_running = False
+        if server_socket: 
+            try: server_socket.close()
+            except: pass
+        with active_conn_lock:
+            count = len(active_connections)
+            for conn in active_connections: 
+                try: conn.close()
+                except: pass
+            active_connections.clear()
+            if count > 0: log(f"Chiuse forzatamente {count} connessioni attive.")
+        btn_start.disabled = False; btn_stop.disabled = True; status_indicator.bgcolor = "red"; status_text.value = "SERVER FERMO"; status_text.color = "red"; page.update()
+        log("--- SERVER OFFLINE ---")
+    btn_start = ft.ElevatedButton("Avvia Server", icon="play_arrow", on_click=start_server_click, bgcolor="green", color="white")
+    btn_stop = ft.ElevatedButton("Ferma Server", icon="stop", on_click=stop_server_click, bgcolor="red", color="white", disabled=True)
+    page.add(
+        ft.Container(content=ft.Row([ft.Row([ft.Icon("dns", size=30, color="blue"), ft.Text("Tris Server", size=24, weight="bold")]), ft.Row([status_indicator, status_text], alignment="center")], alignment=ft.MainAxisAlignment.SPACE_BETWEEN), padding=10, bgcolor="#2c2f38", border_radius=10),
+        ft.Container(content=ft.Row([btn_start, btn_stop], alignment=ft.MainAxisAlignment.CENTER, spacing=20), padding=10),
+        ft.Text("Console Logs:", size=14, color="grey"),
+        ft.Container(content=logs_view, expand=True, bgcolor="#121212", border=ft.border.all(1, "#333333"), border_radius=10, margin=ft.margin.only(top=10)),
+        ft.Text("v1.0 - Powered by Python & Flet", size=10, color="grey", text_align="center")
+    )
+    log("Benvenuto nella Console del Server. Premi 'Avvia' per iniziare.")
 
 if __name__ == "__main__":
-    start_server()
+    ft.app(target=main)
