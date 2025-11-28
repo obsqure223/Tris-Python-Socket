@@ -1,7 +1,7 @@
 import uuid
 import time
 import threading
-import random  # <--- IMPORTANTE
+import random 
 
 class GameRoomError(Exception):
     pass
@@ -10,14 +10,11 @@ class GameRoom:
     def __init__(self, creator_id):
         self.lock = threading.Lock()
         self.id = str(uuid.uuid4())
-        
-        # --- MODIFICA: All'inizio il creatore non ha simbolo (None) ---
         self.players = {creator_id: None} 
-        # --------------------------------------------------------------
         
         self.connections = {} 
         self.board = [None] * 9
-        self.turn = None # Il turno viene deciso dopo
+        self.turn = None
         self.status = "waiting"
         self.move_history = []
         self.created_at = time.time()
