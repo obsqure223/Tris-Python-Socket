@@ -14,11 +14,11 @@ APP_COLORS = {
         "me": "cyan",
         "other": "white",
         "border": "transparent",
-        "login_bg": "#B3000000",
-        "login_border": ft.Colors.WHITE24
+        "login_bg": "transparent", 
+        "login_border": ft.Colors.TRANSPARENT
     },
     "light": {
-        "bg": "#f0f2f5",
+        "bg": "#ffffff",
         "surface": "#ffffff",
         "sidebar": "#ffffff",
         "input_bg": "#f0f2f5",
@@ -28,8 +28,8 @@ APP_COLORS = {
         "accent": "blue",
         "me": "blue",
         "other": "black",
-        "border": "#e4e6eb",
-        "login_bg": "#CCffffff",
-        "login_border": ft.Colors.BLACK12
+        "border": "#ffffff",
+        "login_bg": "transparent",
+        "login_border": ft.Colors.TRANSPARENT
     }
 }
